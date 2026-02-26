@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <title>Währungsrechner EUR / THB / USD (Tageskurs)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;padding:1.5rem;background:#f4f4f4}
+    .container{max-width:720px;margin:0 auto;background:#fff;padding:1.5rem;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+    h1{margin:0 0 .5rem 0;font-size:1.3rem}
+    .muted{color:#666}
+    .rate-box{background:#f0f5ff;border-radius:8px;padding:1rem;margin:1rem 0 1.25rem 0;font-size:.95rem}
+    .rate-box p{margin:.25rem 0}
+    .small{font-size:.82rem;color:#555;line-height:1.35}
+    .error{color:#b00020;font-size:.9rem;margin-top:.5rem}
+    .row{display:flex;align-items:center;gap:.75rem;margin:.75rem 0}
+    label{width:70px;font-weight:650}
+    input{flex:1;padding:.55rem .65rem;font-size:1rem;border-radius:6px;border:1px solid #cfcfcf}
+    .btnrow{display:flex;gap:.5rem;margin-top:.75rem}
+    button{border:1px solid #cfcfcf;background:#fff;padding:.5rem .75rem;border-radius:6px;cursor:pointer}
+    button:hover{background:#fafafa}
+    code{background:#f6f6f6;padding:.1rem .25rem;border-radius:4px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Währungsrechner EUR / THB / USD</h1>
+    <div class="muted small">Gib einen Betrag ein – die anderen Felder rechnen automatisch mit dem Tageskurs.</div>
+
+    <div class="rate-box">
+      <p><strong>Aktueller Referenzkurs (Basis EUR)</strong></p>
+      <p id="rate-eur-usd">Lade EUR → USD …</p>
+      <p id="rate-eur-thb">Lade EUR → THB …</p>
+      <p class="small" id="rate-timestamp"></p>
+      <p class="error" id="rate-error" style="display:none;"></p>
+      <p class="small">
+        Quelle: Europäische Zentralbank (EZB) – tägliche Referenzkurse (Orientierungswerte). [web:56]
+      </p>
+    </div>
+
+    <div class="row">
+      <label for="eur">EUR</label>
+      <input id="eur" type="number" inputmode="decimal" step="0.01" min="0" placeholder="Betrag in Euro" />
+    </div>
+    <div class="row">
+      <label for="thb">THB</label>
+      <input id="thb" type="number" inputmode="decimal" step="0.01" min="0" placeholder="Betrag in Thai Baht" />
+    </div>
+    <div class="row">
+      <label for="usd">USD</label>
+      <input id="usd" type="number" inputmode="decimal" step="0.01" min="0" placeholder="Betrag in US-Dollar" />
+    </div>
+
+    <div class="btnrow">
+      <button type="button" id="btn-refresh">Kurse aktualisieren</button>
+      <button type="button" id="btn-clear">Felder leeren</button>
+    </div>
+
+    <p class="small muted" style="margin-top:1rem;">
+      Offline-Notfall: Der zuletzt geladene Kurs wird lokal gespeichert (Cache), damit du auch ohne Netz weiterrechnen kannst.
+    </p>
+  </div>
+
+<script>
+  // EZB XML (Basis EUR) [web:59]
+  const ECB_DIRECT_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml";
+
+  // CORS-Proxy Fallback: Muster "https://corsproxy.io/?url=ENCODED_URL" [web:98][web:112]
+  function ecbProxyUrl() {
+    return "https://corsproxy.io/?url=" + encodeURIComponent(ECB_DIRECT_URL);
+  }
+
+  const CACHE_KEY = "fx_cache_eur_usd_thb_v2";
+
+  let rateEUR_USD = null;
+  let rateEUR_THB = null;
+  let isUpdating = false;
+
+  const eurInput = document.getElementById("eur");
+  const thbInput = document.getElementById("thb");
+  const usdInput = document.getElementById("usd");
+
+  const rateEurUsdEl = document.getElementById("rate-eur-usd");
+  const rateEurThbEl = document.getElementById("rate-eur-thb");
+  const rateTimestampEl = document.getElementById("rate-timestamp");
+  const rateErrorEl = document.getElementById("rate-error");
+
+  const btnRefresh = document.getElementById("btn-refresh");
+  const btnClear = document.getElementById("btn-clear");
+
+  function parseEcbDailyXml(xmlText) {
+    const doc = new DOMParser().parseFromString(xmlText, "application/xml");
+
+    const usdNode = doc.querySelector('Cube[currency="USD"]');
+    const thbNode = doc.querySelector('Cube[currency="THB"]');
+    const timeNode = doc.querySelector("Cube[time]");
+
+    const usd = usdNode ? parseFloat(usdNode.getAttribute("rate")) : NaN;
+    const thb = thbNode ? parseFloat(thbNode.getAttribute("rate")) : NaN;
+    const date = timeNode ? (timeNode.getAttribute("time") || "") : "";
+
+    if (!Number.isFinite(usd) || !Number.isFinite(thb)) {
+      throw new Error("USD/THB im EZB-XML nicht gefunden.");
+    }
+    return { usd, thb, date };
+  }
+
+  function saveCache(obj) {
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify(obj)); } catch (_) {}
+  }
+
+  function loadCache() {
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function setRateUI({ usd, thb, date, source }) {
+    rateEurUsdEl.textContent = "1 EUR = " + usd.toFixed(4) + " USD";
+    rateEurThbEl.textContent = "1 EUR = " + thb.toFixed(4) + " THB";
+    rateTimestampEl.textContent = (date ? ("Stand: " + date) : "Stand: unbekannt") + (source ? (" (" + source + ")") : "");
+  }
+
+  function applyRates(usd, thb) {
+    rateEUR_USD = usd;
+    rateEUR_THB = thb;
+  }
+
+  async function fetchXmlTextAutomatic() {
+    // 1) Versuch direkt (funktioniert z.B. wenn Browser/Netz es zulässt)
+    try {
+      const r1 = await fetch(ECB_DIRECT_URL, { cache: "no-store" });
+      if (r1.ok) return await r1.text();
+      throw new Error("Direktabruf HTTP " + r1.status);
+    } catch (e1) {
+      // 2) Fallback: Proxy (hilft bei CORS, v.a. bei file:// Origin) [web:85][web:98]
+      const r2 = await fetch(ecbProxyUrl(), { cache: "no-store" });
+      if (!r2.ok) throw new Error("Proxy HTTP " + r2.status);
+      return await r2.text();
+    }
+  }
+
+  function recalcFromFilledField() {
+    const eurVal = parseFloat(String(eurInput.value).replace(",", "."));
+    const usdVal = parseFloat(String(usdInput.value).replace(",", "."));
+    const thbVal = parseFloat(String(thbInput.value).replace(",", "."));
+
+    isUpdating = true;
+    if (Number.isFinite(eurVal)) convertFromEUR(eurVal);
+    else if (Number.isFinite(usdVal)) convertFromUSD(usdVal);
+    else if (Number.isFinite(thbVal)) convertFromTHB(thbVal);
+    isUpdating = false;
+  }
+
+  async function loadRates() {
+    try {
+      rateErrorEl.style.display = "none";
+      rateErrorEl.textContent = "";
+
+      const xmlText = await fetchXmlTextAutomatic();
+      const { usd, thb, date } = parseEcbDailyXml(xmlText);
+
+      applyRates(usd, thb);
+
+      const cacheObj = { usd, thb, date, fetchedAt: new Date().toISOString() };
+      saveCache(cacheObj);
+
+      setRateUI({ usd, thb, date, source: "EZB" });
+      recalcFromFilledField();
+
+    } catch (err) {
+      const cached = loadCache();
+      if (cached?.usd && cached?.thb) {
+        applyRates(cached.usd, cached.thb);
+        setRateUI({ usd: cached.usd, thb: cached.thb, date: cached.date || "", source: "Cache" });
+
+        rateErrorEl.style.display = "block";
+        rateErrorEl.textContent = "Kurse konnten nicht geladen werden (" + err.message + "). Nutze zuletzt gespeicherten Kurs.";
+        recalcFromFilledField();
+      } else {
+        rateErrorEl.style.display = "block";
+        rateErrorEl.textContent =
+          "Kurse konnten nicht geladen werden: " + err.message +
+          " (Hinweis: Bei file:// kann CORS den Direktabruf blockieren.)";
+        rateEurUsdEl.textContent = "EUR → USD nicht verfügbar";
+        rateEurThbEl.textContent = "EUR → THB nicht verfügbar";
+        rateTimestampEl.textContent = "";
+      }
+    }
+  }
+
+  function convertFromEUR(eurVal) {
+    if (rateEUR_USD == null || rateEUR_THB == null) return;
+    usdInput.value = (eurVal * rateEUR_USD).toFixed(2);
+    thbInput.value = (eurVal * rateEUR_THB).toFixed(2);
+  }
+
+  function convertFromUSD(usdVal) {
+    if (rateEUR_USD == null || rateEUR_THB == null) return;
+    const eurVal = usdVal / rateEUR_USD;
+    eurInput.value = eurVal.toFixed(2);
+    thbInput.value = (eurVal * rateEUR_THB).toFixed(2);
+  }
+
+  function convertFromTHB(thbVal) {
+    if (rateEUR_USD == null || rateEUR_THB == null) return;
+    const eurVal = thbVal / rateEUR_THB;
+    eurInput.value = eurVal.toFixed(2);
+    usdInput.value = (eurVal * rateEUR_USD).toFixed(2);
+  }
+
+  function setupListeners() {
+    eurInput.addEventListener("input", () => {
+      if (isUpdating) return;
+      isUpdating = true;
+      const val = parseFloat(String(eurInput.value).replace(",", "."));
+      if (Number.isFinite(val)) convertFromEUR(val);
+      else { thbInput.value = ""; usdInput.value = ""; }
+      isUpdating = false;
+    });
+
+    usdInput.addEventListener("input", () => {
+      if (isUpdating) return;
+      isUpdating = true;
+      const val = parseFloat(String(usdInput.value).replace(",", "."));
+      if (Number.isFinite(val)) convertFromUSD(val);
+      else { eurInput.value = ""; thbInput.value = ""; }
+      isUpdating = false;
+    });
+
+    thbInput.addEventListener("input", () => {
+      if (isUpdating) return;
+      isUpdating = true;
+      const val = parseFloat(String(thbInput.value).replace(",", "."));
+      if (Number.isFinite(val)) convertFromTHB(val);
+      else { eurInput.value = ""; usdInput.value = ""; }
+      isUpdating = false;
+    });
+
+    btnRefresh.addEventListener("click", loadRates);
+    btnClear.addEventListener("click", () => { eurInput.value = ""; thbInput.value = ""; usdInput.value = ""; });
+  }
+
+  setupListeners();
+  loadRates();
+
+  // Tageskurs: selten aktualisieren reicht (z.B. alle 12h)
+  setInterval(loadRates, 12 * 60 * 60 * 1000);
+</script>
+</body>
+</html>
